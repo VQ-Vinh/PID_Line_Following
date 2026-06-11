@@ -1,0 +1,426 @@
+// 260201:  change check sum sensor to sum PDsensor
+#include <Arduino.h>
+#define RED 7
+#define GREEN 12
+#define BLUE 13
+#define DIR_LEFT 5
+#define PWM_LEFT 6
+#define DIR_RIGHT 11
+#define PWM_RIGHT 10
+#define EN_SENSOR 8
+#define Fan 9
+
+#define Out_line_sum 1000    //sum-sensor should > out-line-sum
+#define Out_corner_sum 3000  //sum-sensor should < corner-sum
+
+
+int null_val = 0;
+volatile int racing_time = 20;  //racing_time x 1 = total time (s)
+//float inline_speed = 60;
+float inline_speed = 35;
+float outline_speed = 10;
+float max_speed = outline_speed;
+int fan_speed = 0;
+//int max_speed = 0;
+//float kp = 1;
+float kp = 0.5;
+float kd = 10;
+//float kd = 10;
+
+unsigned char start = 0;
+unsigned char bluetooth_receiver = 0;
+int pattern = 0;
+unsigned int sensorValue[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+unsigned int sensorPDValue[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+unsigned int black_value[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+unsigned int white_value[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+unsigned int compare_value[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+
+
+
+volatile int lastPos;
+volatile unsigned char calibrating = 0;
+volatile int PD_Output;
+volatile unsigned char sensor;
+volatile int cnt = 0;
+volatile int blink = 0;
+int led_status = 0;
+int Sum_sensor_value = 0;
+int Sum_sensor_value_left = 0;
+int Sum_sensor_value_right = 0;
+
+void timer_init() {
+  cli();                                             // Disable interrupts
+  TCCR2A = (1 << WGM21);                             // Set CTC mode
+  TCCR2B = (1 << CS22) | (1 << CS21) | (1 << CS20);  // 1024 Prescaler
+  OCR2A = 155;                                       // (16MHz / 1024 / 100Hz) - 1 = 155.25
+  TIMSK2 = (1 << OCIE2A);                            // Enable CTC interrupt
+  sei();                                             // Enable interrupts
+}
+ISR(TIMER2_COMPA_vect) {
+  // 10ms action here
+  //PD_calculate();
+  cnt++;
+
+  if (max_speed < inline_speed) max_speed++;
+}
+void setup() {
+  Serial.begin(9600);
+
+  delay(2000);
+  // put your setup code here, to run once:
+  pinMode(RED, OUTPUT);
+  pinMode(GREEN, OUTPUT);
+  pinMode(BLUE, OUTPUT);
+  pinMode(DIR_LEFT, OUTPUT);
+  pinMode(PWM_LEFT, OUTPUT);
+  pinMode(DIR_RIGHT, OUTPUT);
+  pinMode(PWM_RIGHT, OUTPUT);
+  pinMode(EN_SENSOR, OUTPUT);
+  digitalWrite(EN_SENSOR, 1);
+  pinMode(Fan, OUTPUT);
+  digitalWrite(Fan, LOW);
+
+  calibrating = 1;
+  timer_init();
+  //pattern = 0;
+  //pattern = 11;
+  pattern = 10;  // start scalibration
+  //start = 0;
+  //start = 1;
+  Serial.println("kp: ?");
+}
+
+void loop() {
+  PD_calculate();
+
+  switch (pattern) {
+    case 0:  // read kp value via serial
+      if (Serial.available() > 0) {
+        kp = Serial.parseFloat();
+        if (kp != null_val) {
+          Serial.print("kp: ");
+          Serial.println(kp);
+          pattern = 1;
+
+          Serial.print("kp= ");
+          Serial.print(kp);
+          Serial.println("  kd: ?");
+        }
+      }
+      //Serial.println();
+      //delay(500);
+      break;
+    case 1:  // read kd value via serial
+
+      if (Serial.available()) {
+        kd = Serial.parseFloat();
+        if (kd != null_val) {
+          Serial.print("kd: ");
+          Serial.println(kd);
+          pattern = 2;
+
+          Serial.print("kp= ");
+          Serial.print(kp);
+          Serial.print("  kd= ");
+          Serial.print(kd);
+          Serial.println("  inline_speed: ?");
+        }
+      }
+      //Serial.println();
+      //delay(500);
+      break;
+    case 2:  // read inline_speed value via serial
+      if (Serial.available()) {
+        inline_speed = Serial.parseFloat();
+        if (inline_speed != null_val) {
+          Serial.print("kp= ");
+          Serial.print(kp);
+          Serial.print("  kd= ");
+          Serial.print(kd);
+          Serial.print("  inline_speed= ");
+          Serial.print(inline_speed);
+          Serial.println("  outline_speed: ?");
+
+          pattern = 3;
+        }
+      }
+
+      break;
+    case 3:  // read outline_speed value via serial
+      if (Serial.available()) {
+        outline_speed = Serial.parseFloat();
+        if (outline_speed != null_val) {
+          Serial.print("kp= ");
+          Serial.print(kp);
+          Serial.print("  kd= ");
+          Serial.print(kd);
+          Serial.print("  inline_speed= ");
+          Serial.print(inline_speed);
+          Serial.print("  outline_speed= ");
+          Serial.print(outline_speed);
+
+          Serial.println("  fan_speed: ?");
+          pattern = 4;
+        }
+      }
+      break;
+    case 4:  // read fan_speed value via serial
+      if (Serial.available()) {
+        fan_speed = Serial.parseFloat();
+        if (fan_speed != null_val) {
+          Serial.print("kp= ");
+          Serial.print(kp);
+          Serial.print("  kd= ");
+          Serial.print(kd);
+          Serial.print("  inline_speed= ");
+          Serial.print(inline_speed);
+          Serial.print("  outline_speed= ");
+          Serial.print(outline_speed);
+
+          Serial.print("  fan_speed= ");
+          Serial.println(fan_speed);
+          delay(1000);
+          Serial.println("calibration");
+          delay(1000);
+          pattern = 10;
+        }
+      }
+      cnt = 0;
+      break;
+    case 10:  // calibration
+      RGB(1);
+      //Serial.end();
+      calibrateSensors();
+      printsensorvalue();
+      if (cnt > 500) { // calibration 5s
+        cnt = 0;
+        pattern = 11;
+        calibrating = 0;
+        digitalWrite(EN_SENSOR, 0);  // turn off white led
+        Serial.println("Ready to go in:");
+        break;
+      }
+      break;
+    case 11:  // countdown 5s
+      RGB(3);
+      if (cnt % 100 == 0) {
+        Serial.println(6 - (cnt / 100));
+        delay(100);
+      }
+      //Serial.println(cnt);
+      if (cnt > 600) {
+        cnt = 0;
+        pattern = 12;
+        Serial.end();                /// turn off serial monitor
+        digitalWrite(EN_SENSOR, 1);  // turn on white led
+        break;
+      }
+      break;
+    case 12:  // ready
+      if (cnt > 100) {
+        cnt = 0;
+        pattern = 20;
+        break;
+      }
+      RGB(2);
+      break;
+    case 20:  // go
+      if (led_status)
+        RGB(6);
+      else
+        RGB(0);
+
+      trackLine(max_speed);
+
+      if (cnt > 100) {
+        racing_time--;
+        cnt = 0;
+        led_status = 1 - led_status;
+        if (racing_time == 0)
+          pattern = 21;
+      }
+      break;
+    case 21:  // stop
+      RGB(1);
+      //motor_run(0, 0);
+      motor_brake();
+      digitalWrite(EN_SENSOR, 0);
+      break;
+  }
+  // put your main code here, to run repeatedly:
+}
+void motor_run(int speedDC_left, int speedDC_right) {
+  // Left motor control
+  if (speedDC_left >= 0) {
+    digitalWrite(DIR_LEFT, LOW);  // Set direction forward
+    analogWrite(PWM_LEFT, speedDC_left);
+  } else {
+    digitalWrite(DIR_LEFT, HIGH);  // Set direction backward
+    analogWrite(PWM_LEFT, 255 + speedDC_left);
+  }
+
+  // Right motor control
+  if (speedDC_right >= 0) {
+    digitalWrite(DIR_RIGHT, LOW);  // Set direction forward
+    analogWrite(PWM_RIGHT, speedDC_right);
+  } else {
+    digitalWrite(DIR_RIGHT, HIGH);  // Set direction backward
+    analogWrite(PWM_RIGHT, 255 + speedDC_right);
+  }
+}
+void motor_brake() {
+  digitalWrite(DIR_LEFT, HIGH);  // Set direction forward
+  digitalWrite(PWM_LEFT, HIGH);
+  digitalWrite(DIR_RIGHT, HIGH);  // Set direction backward
+  digitalWrite(PWM_RIGHT, HIGH);
+  digitalWrite(Fan, LOW);  // turn off fan
+}
+void RGB(int color) {
+  switch (color) {
+    case 0:  // none
+      {
+        digitalWrite(RED, 1);
+        digitalWrite(GREEN, 1);
+        digitalWrite(BLUE, 1);
+        break;
+      }
+    case 1:  // red
+      {
+        digitalWrite(RED, 0);
+        digitalWrite(GREEN, 1);
+        digitalWrite(BLUE, 1);
+        break;
+      }
+    case 2:  // green
+      {
+        digitalWrite(RED, 1);
+        digitalWrite(GREEN, 0);
+        digitalWrite(BLUE, 1);
+        break;
+      }
+    case 3:  // blue
+      {
+        digitalWrite(RED, 1);
+        digitalWrite(GREEN, 1);
+        digitalWrite(BLUE, 0);
+        break;
+      }
+
+    case 4:  // purple
+      {
+        digitalWrite(RED, 0);
+        digitalWrite(GREEN, 1);
+        digitalWrite(BLUE, 0);
+        break;
+      }
+    case 5:  // yellow
+      {
+        digitalWrite(RED, 0);
+        digitalWrite(GREEN, 0);
+        digitalWrite(BLUE, 1);
+        break;
+      }
+    case 6:  // white
+      {
+        digitalWrite(RED, 0);
+        digitalWrite(GREEN, 0);
+        digitalWrite(BLUE, 0);
+        break;
+      }
+  }
+}
+void PD_calculate() {
+  unsigned char temp = 0;
+  unsigned int sum = 0;
+  unsigned long avg = 0;
+  int error, iP, iD;
+  int iRet;
+  Sum_sensor_value = 0;
+  sensorValue[0] = analogRead(A0);
+  sensorValue[1] = analogRead(A1);
+  sensorValue[2] = analogRead(A2);
+  sensorValue[3] = analogRead(A3);
+  sensorValue[4] = analogRead(A4);
+  sensorValue[5] = analogRead(A5);
+  sensorValue[6] = analogRead(A6);
+  sensorValue[7] = analogRead(A7);
+  for (int j = 0; j < 8; j++) {
+    if (calibrating == 0) {
+      if (sensorValue[j] < black_value[j])
+        sensorValue[j] = black_value[j];
+      if (sensorValue[j] > white_value[j])
+        sensorValue[j] = white_value[j];
+      sensorPDValue[j] = map(sensorValue[j], black_value[j], white_value[j], 0, 1000);
+    }
+    temp = temp << 1;
+    if (sensorValue[j] > compare_value[j]) {
+      temp |= 0x01;  // nếu cảm biến j có giá trị lớn hơn giá trị tham chiếu thì gán bit j của temp = 1
+      // temp = temp |
+    } else {
+      temp &= 0xfe;
+    }
+    sensor = temp;
+    Sum_sensor_value += sensorPDValue[j];
+  }
+
+  if (Sum_sensor_value > Out_line_sum) {
+    //if (max_speed < inline_speed) max_speed++;
+
+    for (int j = 0; j < 8; j++) {
+      avg += (long)(sensorPDValue[j]) * ((j)*1000);
+      sum += sensorPDValue[j];
+    }
+    error = (int)((avg / sum) - 3500);
+
+    iP = kp * error;
+    iD = kd * (lastPos - error);
+    iRet = (iP - iD);
+    if ((iRet < -4000)) {
+      iRet = 0;
+    }
+    PD_Output = iRet / 30;  // 12 //25 //15 //20
+    //PD_Output = iRet / 45;  // 12 //25 //15 //20
+
+    lastPos = error;
+  } else {
+    max_speed = outline_speed;
+  }
+}
+void trackLine(int speed) {
+  robot_pid(PD_Output, speed);
+}
+void robot_pid(int diff, int speed) {
+  int speedLeft;
+  int speedRight;
+
+  speedLeft = speed + diff;
+  speedRight = speed - diff;
+
+  // if robot inline => refresh speed
+  motor_run(speedLeft, speedRight);
+}
+void calibrateSensors() {
+  for (int i = 0; i < 8; i++) {
+    // Serial.print(sensorValue[i]);
+    // Serial.print("  ");
+    if (black_value[i] == 0)
+      black_value[i] = 1100;
+    if (sensorValue[i] < black_value[i])
+      black_value[i] = sensorValue[i];
+    if (sensorValue[i] > white_value[i])
+      white_value[i] = sensorValue[i];
+    compare_value[i] = (black_value[i] + white_value[i]) / 2;
+  }
+  //Serial.print("  |  ");
+  // Serial.print(sensor, BIN);
+  // Serial.print(sensor, HEX);
+  //Serial.println();
+}
+void printsensorvalue() {
+  for (int i = 0; i < 8; i++) {
+    Serial.print(sensorValue[i]);
+    Serial.print("  ");
+  }
+  Serial.println();
+}
